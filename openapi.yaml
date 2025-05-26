@@ -1,0 +1,56 @@
+openapi: 3.0.0
+info:
+  title: SFTPGo Webhook
+  version: 1.0.0
+paths:
+  /webhook:
+    post:
+      summary: Pre-login hook for SFTPGo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SFTPGoUser'
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MinimalSFTPGoUser'
+components:
+  schemas:
+    SFTPGoUser:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+    MinimalSFTPGoUser:
+      type: object
+      properties:
+        username:
+          type: string
+        home_dir:
+          type: string
+        permissions:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        status:
+          type: integer
+        virtual_folders:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserVirtualFolder'
+    UserVirtualFolder:
+      type: object
+      properties:
+        name:
+          type: string
+        virtual_path:
+          type: string
