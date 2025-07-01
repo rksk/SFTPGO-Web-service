@@ -3,7 +3,7 @@ info:
   title: SFTPGo Webhook
   version: 1.0.0
 paths:
-  /webhook:
+  /prelogin-hook:
     post:
       summary: Pre-login hook for SFTPGo
       requestBody:
