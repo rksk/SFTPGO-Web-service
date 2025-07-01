@@ -385,8 +385,8 @@ func preLoginHook(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/webhook", preLoginHook)
-	log.Println("Listening on :3000/pre-login")
+	http.HandleFunc("/prelogin-hook", preLoginHook)
+	log.Println("Listening on :3000/prelogin-hook")
 	if err := http.ListenAndServe(":3000", nil); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
