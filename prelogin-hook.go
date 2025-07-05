@@ -64,8 +64,6 @@ var (
 	AdminKey       = os.Getenv("ADMIN_KEY")
 	SftpgoFolders  = os.Getenv("SFTPGO_FOLDERS")  // Used for GET /folders/{name}
 	FolderPath     = os.Getenv("FOLDER_PATH")
-	SftpgoFolders2 = os.Getenv("SFTPGO_FOLDERS2") // Used for POST /folders
-	SftpgoFolders3 = os.Getenv("SFTPGO_FOLDERS3") // Used for GET /folders
 	CheckRole      = os.Getenv("CHECK_ROLE")
 	DIRPath        = os.Getenv("DIR_PATH")
 	SCIMScope      = os.Getenv("SCIM_SCOPE")
@@ -238,7 +236,7 @@ func getSftpgoAdminToken() (string, error) {
 
 func checkFolderExists(name, token string) (bool, error) {
 	log.Printf("Checking if SFTPGo folder '%s' exists.", name)
-	endpoint := fmt.Sprintf(SftpgoFolders, name)
+	endpoint := SftpgoFolders + "/" + name
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to create folder check request for '%s': %v", name, err)
@@ -291,14 +289,14 @@ func createFolder(name, token, user string) error {
 		return fmt.Errorf("failed to marshal payload: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", SftpgoFolders2, strings.NewReader(string(b)))
+	req, err := http.NewRequest("POST", SftpgoFolders, strings.NewReader(string(b)))
 	if err != nil {
 		log.Printf("ERROR: Failed to create SFTPGo folder creation request for '%s': %v", name, err)
 		return fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	log.Printf("Sending SFTPGo folder creation request to %s with payload: %s", SftpgoFolders2, string(b))
+	log.Printf("Sending SFTPGo folder creation request to %s with payload: %s", SftpgoFolders, string(b))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -348,7 +346,7 @@ func provisionUserFolders(user string, folders []string) error {
 
 func getAllFolders(token string) ([]UserVirtualFolder, error) {
 	log.Println("Fetching all existing SFTPGo folders.")
-	endpoint := SftpgoFolders3
+	endpoint := SftpgoFolders // + "?limit=5000"
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ERROR: Failed to create request to get all SFTPGo folders: %v", err)
@@ -540,15 +538,13 @@ func main() {
 	log.Printf("  ADMIN_USER: %s (first 4 chars)", AdminUser[:min(len(AdminUser), 4)]) // Mask sensitive info
 	log.Printf("  SFTPGO_FOLDERS: %s", SftpgoFolders)
 	log.Printf("  FOLDER_PATH: %s", FolderPath)
-	log.Printf("  SFTPGO_FOLDERS2: %s", SftpgoFolders2)
-	log.Printf("  SFTPGO_FOLDERS3: %s", SftpgoFolders3)
 	log.Printf("  CHECK_ROLE: %s", CheckRole)
 	log.Printf("  DIR_PATH: %s", DIRPath)
 	log.Printf("  SCIM_SCOPE: %s", SCIMScope)
 
 	// Basic validation for critical environment variables
-	if ClientID == "" || ClientSecret == "" || TokenURL == "" || SCIMBaseURL == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || SftpgoFolders2 == "" || SftpgoFolders3 == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
-		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, TOKEN_URL, SCIM_BASE_URL, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, SFTPGO_FOLDERS2, SFTPGO_FOLDERS3, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
+	if ClientID == "" || ClientSecret == "" || TokenURL == "" || SCIMBaseURL == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
+		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, TOKEN_URL, SCIM_BASE_URL, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
 	}
 
 	http.HandleFunc("/prelogin-hook", preLoginHook)
