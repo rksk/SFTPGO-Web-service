@@ -552,8 +552,8 @@ func main() {
 	}
 
 	http.HandleFunc("/prelogin-hook", preLoginHook)
-	log.Println("SFTPGo Pre-Login Hook listening on :3000/prelogin-hook")
-	if err := http.ListenAndServe(":3000", nil); err != nil {
+	log.Println("SFTPGo Pre-Login Hook listening on :9000/prelogin-hook")
+	if err := http.ListenAndServe(":9000", nil); err != nil {
 		log.Fatalf("FATAL: Server error: %v", err)
 	}
 }
