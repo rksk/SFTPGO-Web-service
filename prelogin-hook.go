@@ -270,11 +270,11 @@ func checkFolderExists(name, token string) (bool, error) {
 func createFolder(name, token, user string) error {
 	log.Printf("Attempting to create SFTPGo folder '%s' for user '%s'.", name, user)
 	path := filepath.Join(FolderPath, name)
-	log.Printf("Creating local directory path: %s", path)
-	if err := os.MkdirAll(path, 0755); err != nil {
-		log.Printf("ERROR: Failed to create local directory %s: %v", path, err)
-		return fmt.Errorf("failed to create local directory: %v", err)
-	}
+	// log.Printf("Creating local directory path: %s", path)
+	// if err := os.MkdirAll(path, 0755); err != nil {
+	// 	log.Printf("ERROR: Failed to create local directory %s: %v", path, err)
+	// 	return fmt.Errorf("failed to create local directory: %v", err)
+	// }
 
 	payload := map[string]interface{}{
 		"name":         name,
