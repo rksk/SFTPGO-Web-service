@@ -5,9 +5,9 @@ schemaVersion: 1.2
 endpoints:
   # +required Unique name for the endpoint.
   # This name will be used when generating the managed API
-  - name: pre-login-service
+  - name: login-service
     # +optional Display name for the endpoint.
-    displayName: Pre-Login service for SFTPGo
+    displayName: Login service for SFTPGo
     # +required Service section has the user service endpoint details
     service:
       # +optional Context (base path) of the API that gets exposed via the endpoint.

@@ -1,56 +1,467 @@
 openapi: 3.0.0
 info:
-  title: SFTPGo Webhook
+  title: SFTPGo Custom Authentication and User Provisioning Hooks
   version: 1.0.0
+  description: |
+    This API defines the endpoints used by SFTPGo as external hooks for pre-login user management and keyboard-interactive authentication.
+
+    **Pre-Login Hook (`/prelogin-hook`)**:
+    This hook is invoked by SFTPGo before a user logs in. It is responsible for:
+    1. Receiving a minimal SFTPGo user object.
+    2. If the user is new (ID is 0), it fetches detailed user information from an Asgardeo identity provider.
+    3. Based on the user's role (e.g., "internal"), it configures SFTPGo user properties like home directory, permissions, and virtual folders.
+       - "internal" roles get access to all existing SFTPGo folders with full permissions.
+       - Other roles get a dedicated home directory and potentially specific custom folders from an external API or Asgardeo's custom attributes, with more restrictive permissions.
+    4. It provisions any required folders in SFTPGo via SFTPGo's administrative API.
+    5. Returns an enriched SFTPGo user object to SFTPGo.
+
+    **Authentication Hook (`/auth-hook`)**:
+    This hook handles SFTPGo's keyboard-interactive authentication flow. It integrates with Asgardeo's authentication API to perform multi-step authentication, including password verification and handling of multi-factor authentication (MFA) like TOTP or email OTP.
+servers:
+  - url: http://localhost:9000
+    description: SFTPGo Hook Service
 paths:
   /prelogin-hook:
     post:
-      summary: Pre-login hook for SFTPGo
+      summary: Handle SFTPGo pre-login user provisioning
+      operationId: preLoginHook
+      description: |
+        Processes SFTPGo user requests before login. If the user is new (ID=0), it fetches user details from Asgardeo,
+        determines their SFTPGo configuration (home directory, permissions, virtual folders) based on their role,
+        and provisions necessary folders. Returns the enhanced SFTPGo user object.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SFTPGoUser'
+              $ref: '#/components/schemas/SFTPGoUserRequest'
+            examples:
+              newUser:
+                summary: Example for a new user
+                value:
+                  id: 0
+                  username: john.doe@example.com
+              existingUser:
+                summary: Example for an existing user (SFTPGo already knows)
+                value:
+                  id: 123
+                  username: jane.smith@example.com
       responses:
         '200':
-          description: Successful response
+          description: User configuration successfully determined and returned to SFTPGo.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MinimalSFTPGoUser'
+                $ref: '#/components/schemas/MinimalSFTPGoUserResponse'
+              examples:
+                internalAdminUser:
+                  summary: Example response for a 'internal'
+                  value:
+                    username: admin@example.com
+                    home_dir: /sftp_root
+                    permissions:
+                      /: ["list"]
+                      /shared: ["upload", "list", "download", "create_dirs", "delete"]
+                    status: 1
+                    virtual_folders:
+                      - name: shared
+                        virtual_path: /shared
+                regularUser:
+                  summary: Example response for a regular user
+                  value:
+                    username: user1@example.com
+                    home_dir: /data/user1_example_com
+                    permissions:
+                      /: ["list"]
+                      /user1_example_com: ["upload", "list", "download", "create_dirs", "delete"]
+                    status: 1
+                    virtual_folders:
+                      - name: user1_example_com
+                        virtual_path: /user1_example_com
+        '204':
+          description: SFTPGo user ID is not 0; no further action required by the hook.
+        '400':
+          description: Invalid payload or missing username in the request.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid payload
+        '401':
+          description: User not found or unauthorized in Asgardeo.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: User not found
+        '405':
+          description: Method Not Allowed. Only POST requests are accepted.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Method not allowed
+        '500':
+          description: Internal server error (e.g., failed to obtain tokens, Asgardeo API errors, folder provisioning issues).
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Internal error
+  /auth-hook:
+    post:
+      summary: Handle SFTPGo keyboard-interactive authentication
+      operationId: authHook
+      description: |
+        Implements a multi-step keyboard-interactive authentication flow with an external identity provider (Asgardeo).
+        It manages session state for authentication steps (password, MFA like TOTP/OTP) and provides instructions
+        and questions back to SFTPGo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeyIntRequest'
+            examples:
+              step1Initial:
+                summary: Step 1 - Initial password prompt
+                value:
+                  request_id: "req123"
+                  step: 1
+                  username: "user@example.com"
+                  ip: "192.168.1.100"
+                  answers: []
+              step2Password:
+                summary: Step 2 - User provides password
+                value:
+                  request_id: "req123"
+                  step: 2
+                  username: "user@example.com"
+                  ip: "192.168.1.100"
+                  answers: ["myPassword123"]
+              step3MfaChoice:
+                summary: Step 3 - User chooses MFA method (if applicable)
+                value:
+                  request_id: "req123"
+                  step: 3
+                  username: "user@example.com"
+                  ip: "192.168.1.100"
+                  answers: ["2"] # Chooses OTP
+              step3OtpCode:
+                summary: Step 3 - User provides OTP code (if no choice was given)
+                value:
+                  request_id: "req123"
+                  step: 3
+                  username: "user@example.com"
+                  ip: "192.168.1.100"
+                  answers: ["123456"]
+              step4TotpCode:
+                summary: Step 4 - User provides TOTP code (after choosing TOTP)
+                value:
+                  request_id: "req123"
+                  step: 4
+                  username: "user@example.com"
+                  ip: "192.168.1.100"
+                  answers: ["654321"]
+      responses:
+        '200':
+          description: Returns instructions/questions for the next authentication step or the final authentication result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyIntResponse'
+              examples:
+                promptPassword:
+                  summary: Prompt for password (Step 1 response)
+                  value:
+                    instruction: "Enter your password:"
+                    questions: ["Password:"]
+                    echos: [false]
+                promptMfaChoice:
+                  summary: Prompt for MFA method selection (Step 2 response for TOTP-enabled)
+                  value:
+                    instruction: "Select the authentication method:"
+                    questions: ["[1] TOTP\n[2] OTP\nEnter:"]
+                    echos: [true]
+                promptOtpCode:
+                  summary: Prompt for OTP code (Step 2 or 3 response)
+                  value:
+                    instruction: "Enter the code:"
+                    questions: ["Code:"]
+                    echos: [false]
+                authSuccess:
+                  summary: Authentication successful
+                  value:
+                    auth_result: 1
+                authFailure:
+                  summary: Authentication failed
+                  value:
+                    auth_result: -1
+        '400':
+          description: Invalid payload in the request.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Invalid payload
+        '500':
+          description: Internal server error during the authentication flow.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Internal server error
+  /subscription-hook:
+    get:
+      summary: Get Subscription Information by Email
+      operationId: getSubscriptionInfo
+      description: |
+        Retrieves dummy subscription information for a given email address.
+        The response status and payload vary based on the provided email, simulating
+        different backend scenarios (valid customer, new customer, contact not found, internal error).
+      parameters:
+        - name: email
+          in: query
+          description: The email address of the customer to query.
+          required: true
+          schema:
+            type: string
+          examples:
+            customer1:
+              summary: A valid customer email
+              value: customer1@example.com
+            newuser1:
+              summary: A new or non-valid customer email
+              value: newuser1@example.com
+            contactNotFound:
+              summary: An email explicitly configured to return "not found"
+              value: contact.not.found@example.com
+            serverError:
+              summary: An email configured to simulate a server error
+              value: error@example.com
+            missingEmail:
+              summary: Example of a request missing the email parameter (will result in 400)
+              value: "" # This won't be in the URL, but represents the absence
+      responses:
+        '200':
+          description: Successfully retrieved customer information for a valid customer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerInfo'
+              examples:
+                validCustomer:
+                  value:
+                    isValidCustomer: true
+                    projectKeys:
+                      - ABCSUB
+                      - XYZSUB
+        '201':
+          description: |
+            Customer email processed, but the customer is either new, not valid, or unknown.
+            Note: HTTP 201 Created is typically for resource creation. Here it's used
+            as per the dummy API's specified behavior for `isValidCustomer: false`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerInfo'
+              examples:
+                invalidCustomer:
+                  value:
+                    isValidCustomer: false
+                    projectKeys: []
+        '400':
+          description: |
+            Bad Request.
+            This can occur if the 'email' query parameter is missing, or if the provided
+            email explicitly triggers a "contact not found" scenario.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              examples:
+                missingParam:
+                  value:
+                    message: Email query parameter is required.
+                contactNotFound:
+                  value:
+                    message: Contact not found.
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              examples:
+                internalError:
+                  value:
+                    message: Error while fetching Contact information.
 components:
   schemas:
-    SFTPGoUser:
+    SFTPGoUserRequest:
       type: object
+      description: Represents a minimal user object sent by SFTPGo to the pre-login hook.
       properties:
         id:
           type: integer
+          description: The SFTPGo user ID. Will be 0 for new users.
+          example: 0
         username:
           type: string
-    MinimalSFTPGoUser:
+          description: The username attempting to log in.
+          example: john.doe@example.com
+      required:
+        - username
+
+    UserVirtualFolder:
       type: object
+      description: Represents a virtual folder assigned to an SFTPGo user.
+      properties:
+        name:
+          type: string
+          description: The name of the virtual folder.
+          example: my_shared_folder
+        virtual_path:
+          type: string
+          description: The virtual path where the folder is exposed to the user.
+          example: /my_shared_folder
+      required:
+        - name
+        - virtual_path
+
+    MinimalSFTPGoUserResponse:
+      type: object
+      description: |
+        Represents the enriched SFTPGo user object returned by the pre-login hook.
+        SFTPGo uses this to configure the user's session.
       properties:
         username:
           type: string
+          description: The username.
+          example: john.doe@example.com
         home_dir:
           type: string
+          description: The absolute path to the user's home directory on the SFTPGo server.
+          example: /srv/sftp/john_doe_example_com
         permissions:
           type: object
+          description: |
+            A map where keys are virtual paths (e.g., '/') and values are arrays of allowed operations
+            (e.g., "list", "download", "upload", "create_dirs", "delete", "*").
           additionalProperties:
             type: array
             items:
               type: string
+              enum: ["list", "download", "upload", "create_dirs", "delete", "*"]
+          example:
+            /: ["list", "download", "upload"]
+            /my_folder: ["upload", "list", "download", "create_dirs", "delete"]
         status:
           type: integer
+          description: The status of the user (e.g., 1 for active).
+          example: 1
         virtual_folders:
           type: array
+          description: List of virtual folders to be exposed to the user.
           items:
             $ref: '#/components/schemas/UserVirtualFolder'
-    UserVirtualFolder:
+          example:
+            - name: my_folder
+              virtual_path: /my_folder
+
+    KeyIntRequest:
       type: object
+      description: Request payload from SFTPGo for keyboard-interactive authentication.
       properties:
-        name:
+        request_id:
           type: string
-        virtual_path:
+          description: A unique identifier for the authentication session.
+          example: "abcedfg12345"
+        step:
+          type: integer
+          description: The current step in the keyboard-interactive flow.
+          example: 1
+        username:
           type: string
+          description: The username attempting to authenticate.
+          example: "user@example.com"
+        ip:
+          type: string
+          description: The IP address of the client.
+          example: "192.168.1.1"
+        answers:
+          type: array
+          description: An array of strings containing the user's responses to questions from the previous step.
+          items:
+            type: string
+          example: ["my_secret_password"]
+      required:
+        - request_id
+        - step
+        - username
+
+    KeyIntResponse:
+      type: object
+      description: Response payload to SFTPGo for keyboard-interactive authentication.
+      properties:
+        instruction:
+          type: string
+          description: A message or instruction to display to the user.
+          example: "Enter your password:"
+        questions:
+          type: array
+          description: An array of questions to prompt the user for input.
+          items:
+            type: string
+          example: ["Password:"]
+        echos:
+          type: array
+          description: An array of booleans indicating whether the input for each question should be echoed (true) or hidden (false). Corresponds to `questions`.
+          items:
+            type: boolean
+          example: [false]
+        check_password:
+          type: integer
+          description: |
+            SFTPGo specific flag. A value of 1 instructs SFTPGo to internally check the password after this hook
+            (typically for scenarios where the hook only validates part of the authentication).
+            This hook usually sets auth_result directly.
+          example: 0
+        auth_result:
+          type: integer
+          description: |
+            The authentication result.
+            - `1`: Authentication successful.
+            - `-1`: Authentication failed.
+            - `0`: Authentication is still in progress (more steps required).
+          example: 0
+    CustomerInfo:
+      type: object
+      description: Details about a customer's subscription status and projects.
+      properties:
+        isValidCustomer:
+          type: boolean
+          description: Indicates if the queried email belongs to a valid customer.
+          example: true
+        projectKeys:
+          type: array
+          description: A list of project keys associated with the customer's subscription.
+          items:
+            type: string
+          example:
+            - ABCSUB
+            - XYZSUB
+      required:
+        - isValidCustomer
+        - projectKeys
+
+    ErrorMessage:
+      type: object
+      description: Standard error response message.
+      properties:
+        message:
+          type: string
+          description: A human-readable message describing the error.
+          example: Contact not found.
+      required:
+        - message
