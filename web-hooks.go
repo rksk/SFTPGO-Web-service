@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,13 +59,12 @@ type AsgardeoUser struct {
 var (
 	ClientID       = os.Getenv("CLIENT_ID")
 	ClientSecret   = os.Getenv("CLIENT_SECRET")
-	TokenURL       = os.Getenv("TOKEN_URL")
-	SCIMBaseURL    = os.Getenv("SCIM_BASE_URL")
+	IdPBasePath    = os.Getenv("IDP_BASE_PATH")
 	FetchFolderAPI = os.Getenv("FETCH_FOLDER_API")
 	AdminTokenURL  = os.Getenv("ADMIN_TOKEN_URL")
 	AdminUser      = os.Getenv("ADMIN_USER")
 	AdminKey       = os.Getenv("ADMIN_KEY")
-	SftpgoFolders  = os.Getenv("SFTPGO_FOLDERS")  // Used for GET /folders/{name}
+	SftpgoFolders  = os.Getenv("SFTPGO_FOLDERS") // Used for GET /folders/{name}
 	FolderPath     = os.Getenv("FOLDER_PATH")
 	CheckRole      = os.Getenv("CHECK_ROLE")
 	DIRPath        = os.Getenv("DIR_PATH")
@@ -86,6 +88,7 @@ func getBearerToken() (string, error) {
 	data.Set("client_secret", ClientSecret)
 	data.Set("scope", SCIMScope)
 
+	var TokenURL string = IdPBasePath + "/oauth2/token"
 	req, err := http.NewRequest("POST", TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		log.Printf("ERROR: Failed to create token request: %v", err)
@@ -127,6 +130,8 @@ func getAsgardeoUser(username, token string) (*AsgardeoUser, error) {
 	filter := fmt.Sprintf(`userName eq "%s"`, asgUser)
 	params := url.Values{}
 	params.Set("filter", filter)
+
+	var SCIMBaseURL string = IdPBasePath + "/scim2/Users"
 	scimURL := fmt.Sprintf("%s?%s", SCIMBaseURL, params.Encode())
 
 	req, err := http.NewRequest("GET", scimURL, nil)
@@ -531,8 +536,7 @@ func main() {
 	log.Println("Starting SFTPGo Pre-Login Hook service...")
 	log.Printf("Environment Variables Loaded:")
 	log.Printf("  CLIENT_ID: %s", ClientID)
-	log.Printf("  TOKEN_URL: %s", TokenURL)
-	log.Printf("  SCIM_BASE_URL: %s", SCIMBaseURL)
+	log.Printf("  IDP_BASE_PATH: %s", IdPBasePath)
 	log.Printf("  FETCH_FOLDER_API: %s", FetchFolderAPI)
 	log.Printf("  ADMIN_TOKEN_URL: %s", AdminTokenURL)
 	log.Printf("  ADMIN_USER: %s (first 4 chars)", AdminUser[:min(len(AdminUser), 4)]) // Mask sensitive info
@@ -543,12 +547,14 @@ func main() {
 	log.Printf("  SCIM_SCOPE: %s", SCIMScope)
 
 	// Basic validation for critical environment variables
-	if ClientID == "" || ClientSecret == "" || TokenURL == "" || SCIMBaseURL == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
-		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, TOKEN_URL, SCIM_BASE_URL, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
+	if ClientID == "" || ClientSecret == "" || IdPBasePath == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
+		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, IDP_BASE_PATH, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
 	}
 
 	http.HandleFunc("/prelogin-hook", preLoginHook)
-	log.Println("SFTPGo Pre-Login Hook listening on :9000/prelogin-hook")
+	http.HandleFunc("/auth-hook", keyIntHandler)
+
+	log.Println("SFTPGo Pre-Login and Auth Hooks are listening on :9000/prelogin-hook and :9000/auth-hook")
 	if err := http.ListenAndServe(":9000", nil); err != nil {
 		log.Fatalf("FATAL: Server error: %v", err)
 	}
@@ -560,4 +566,328 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type KeyIntRequest struct {
+	RequestID string   `json:"request_id"`
+	Step      int      `json:"step"`
+	Username  string   `json:"username"`
+	IP        string   `json:"ip"`
+	Answers   []string `json:"answers"`
+}
+
+type KeyIntResponse struct {
+	Instruction   string   `json:"instruction,omitempty"`
+	Questions     []string `json:"questions,omitempty"`
+	Echos         []bool   `json:"echos,omitempty"`
+	CheckPassword int      `json:"check_password,omitempty"`
+	AuthResult    int      `json:"auth_result,omitempty"`
+}
+
+type sessionData struct {
+	flowID          string
+	authenticatorID string
+}
+
+var (
+	sessionCache = make(map[string]sessionData)
+	cacheMutex   = &sync.Mutex{}
+)
+
+// func main() {
+// 	http.HandleFunc("/auth", keyIntHandler)
+// 	log.Println("Starting keyboard-interactive webhook on :3001")
+// 	log.Fatal(http.ListenAndServe(":3001", nil))
+// }
+
+func keyIntHandler(w http.ResponseWriter, r *http.Request) {
+	var req KeyIntRequest
+	body, _ := ioutil.ReadAll(r.Body)
+	json.Unmarshal(body, &req)
+	log.Printf("recv step=%d id=%s user=%s answers=%v", req.Step, req.RequestID, req.Username, req.Answers)
+
+	var resp KeyIntResponse
+	client := &http.Client{Timeout: 15 * time.Second}
+	idpURL := IdPBasePath + "/oauth2/authn"
+
+	switch req.Step {
+	case 1:
+		resp.Instruction = "Enter your password:"
+		resp.Questions = []string{"Password:"}
+		resp.Echos = []bool{false}
+
+	case 2:
+		password := ""
+		if len(req.Answers) > 0 {
+			password = req.Answers[0]
+		}
+
+		flow := getFlowID(client)
+		cacheMutex.Lock()
+		sessionCache[req.RequestID] = sessionData{flowID: flow}
+		cacheMutex.Unlock()
+
+		primary := map[string]interface{}{
+			"flowId": flow,
+			"selectedAuthenticator": map[string]interface{}{
+				"authenticatorId": "QmFzaWNBdXRoZW50aWNhdG9yOkxPQ0FM",
+				"params":          map[string]interface{}{"username": req.Username, "password": password},
+			},
+		}
+
+		primResp, err := postJSON(client, idpURL, primary)
+		if err != nil {
+			log.Printf("Primary auth failed: %v", err)
+			resp.AuthResult = -1
+			break
+		}
+
+		var p map[string]interface{}
+		json.Unmarshal(primResp, &p)
+
+		totpAvailable := false
+		if ns, ok := p["nextStep"].(map[string]interface{}); ok {
+			if auths, ok := ns["authenticators"].([]interface{}); ok {
+				for _, a := range auths {
+					if obj, _ := a.(map[string]interface{}); obj["authenticatorId"] == "dG90cDpMT0NBTA" {
+						totpAvailable = true
+					}
+				}
+			}
+		}
+
+		if !totpAvailable {
+			// Automatically proceed with email OTP
+			otpSelect := map[string]interface{}{
+				"flowId": flow,
+				"selectedAuthenticator": map[string]interface{}{
+					"authenticatorId": "ZW1haWwtb3RwLWF1dGhlbnRpY2F0b3I6TE9DQUw",
+				},
+			}
+			respBody, err := postJSON(client, idpURL, otpSelect)
+			if err != nil {
+				log.Printf("OTP selection failed: %v", err)
+				resp.AuthResult = -1
+				break
+			}
+
+			var otpResp map[string]interface{}
+			if err := json.Unmarshal(respBody, &otpResp); err != nil || otpResp["flowStatus"] != "INCOMPLETE" {
+				log.Printf("OTP trigger failed: %s", string(respBody))
+				resp.AuthResult = -1
+				break
+			}
+
+			cacheMutex.Lock()
+			sessionCache[req.RequestID] = sessionData{
+				flowID:          flow,
+				authenticatorID: "ZW1haWwtb3RwLWF1dGhlbnRpY2F0b3I6TE9DQUw",
+			}
+			cacheMutex.Unlock()
+
+			// Directly prompt for OTP code after sending
+			resp.Instruction = "Enter the code:"
+			resp.Questions = []string{"Code:"}
+			resp.Echos = []bool{false}
+		} else {
+			// Show method selection for TOTP-enabled users
+			resp.Instruction = "Select the authentication method:"
+			resp.Questions = []string{"[1] TOTP\n[2] OTP\nEnter:"}
+			resp.Echos = []bool{true}
+		}
+
+	case 3:
+		cacheMutex.Lock()
+		data, ok := sessionCache[req.RequestID]
+		cacheMutex.Unlock()
+
+		if ok && data.authenticatorID != "" {
+			// Handle OTP-only verification immediately
+			code := ""
+			if len(req.Answers) > 0 {
+				code = req.Answers[0]
+			}
+
+			verifyPayload := map[string]interface{}{
+				"flowId": data.flowID,
+				"selectedAuthenticator": map[string]interface{}{
+					"authenticatorId": data.authenticatorID,
+					"params":          map[string]interface{}{"OTPCode": code},
+				},
+			}
+
+			respBody, err := postJSON(client, idpURL, verifyPayload)
+			if err != nil {
+				log.Printf("Verification failed: %v", err)
+				resp.AuthResult = -1
+				break
+			}
+
+			var authResult map[string]interface{}
+			if err := json.Unmarshal(respBody, &authResult); err != nil {
+				log.Printf("Invalid verification response: %v", err)
+				resp.AuthResult = -1
+				break
+			}
+
+			var authCode string
+			if auth, ok := authResult["authorizationCode"].(string); ok && auth != "" {
+				authCode = auth
+			} else if authData, ok := authResult["authData"].(map[string]interface{}); ok {
+				if code, ok := authData["code"].(string); ok && code != "" {
+					authCode = code
+				}
+			}
+
+			if authCode != "" {
+				log.Printf("Authentication successful for %s", req.Username)
+				resp.AuthResult = 1
+			} else {
+				log.Printf("Verification failed: %s", string(respBody))
+				resp.AuthResult = -1
+			}
+
+			cacheMutex.Lock()
+			delete(sessionCache, req.RequestID)
+			cacheMutex.Unlock()
+		} else {
+			// Handle TOTP method selection and code prompt
+			if len(req.Answers) > 0 {
+				if req.Answers[0] == "2" {
+					// OTP Flow
+					otpSelect := map[string]interface{}{
+						"flowId": data.flowID,
+						"selectedAuthenticator": map[string]interface{}{
+							"authenticatorId": "ZW1haWwtb3RwLWF1dGhlbnRpY2F0b3I6TE9DQUw",
+						},
+					}
+					_, err := postJSON(client, idpURL, otpSelect)
+					if err != nil {
+						log.Printf("OTP selection failed: %v", err)
+						resp.AuthResult = -1
+						break
+					}
+
+					data.authenticatorID = "ZW1haWwtb3RwLWF1dGhlbnRpY2F0b3I6TE9DQUw"
+				} else {
+					// TOTP Flow
+					totpSelect := map[string]interface{}{
+						"flowId": data.flowID,
+						"selectedAuthenticator": map[string]interface{}{
+							"authenticatorId": "dG90cDpMT0NBTA",
+						},
+					}
+					_, err := postJSON(client, idpURL, totpSelect)
+					if err != nil {
+						log.Printf("TOTP selection failed: %v", err)
+						resp.AuthResult = -1
+						break
+					}
+					data.authenticatorID = "dG90cDpMT0NBTA"
+				}
+
+				cacheMutex.Lock()
+				sessionCache[req.RequestID] = data
+				cacheMutex.Unlock()
+			}
+
+			resp.Instruction = "Enter the code:"
+			resp.Questions = []string{"Code:"}
+			resp.Echos = []bool{false}
+		}
+
+	case 4:
+		// Only TOTP-enabled users reach here
+		code := ""
+		if len(req.Answers) > 0 {
+			code = req.Answers[0]
+		}
+
+		cacheMutex.Lock()
+		data, ok := sessionCache[req.RequestID]
+		cacheMutex.Unlock()
+
+		if !ok {
+			resp.AuthResult = -1
+			break
+		}
+
+		verifyPayload := map[string]interface{}{
+			"flowId": data.flowID,
+			"selectedAuthenticator": map[string]interface{}{
+				"authenticatorId": data.authenticatorID,
+				"params":          map[string]interface{}{"token": code},
+			},
+		}
+
+		respBody, err := postJSON(client, idpURL, verifyPayload)
+		if err != nil {
+			log.Printf("Verification failed: %v", err)
+			resp.AuthResult = -1
+			break
+		}
+
+		var authResult map[string]interface{}
+		if err := json.Unmarshal(respBody, &authResult); err != nil {
+			log.Printf("Invalid verification response: %v", err)
+			resp.AuthResult = -1
+			break
+		}
+
+		var authCode string
+		if auth, ok := authResult["authorizationCode"].(string); ok && auth != "" {
+			authCode = auth
+		} else if authData, ok := authResult["authData"].(map[string]interface{}); ok {
+			if code, ok := authData["code"].(string); ok && code != "" {
+				authCode = code
+			}
+		}
+
+		if authCode != "" {
+			log.Printf("Authentication successful for %s", req.Username)
+			resp.AuthResult = 1
+		} else {
+			log.Printf("Verification failed: %s", string(respBody))
+			resp.AuthResult = -1
+		}
+
+		cacheMutex.Lock()
+		delete(sessionCache, req.RequestID)
+		cacheMutex.Unlock()
+	default:
+		resp.AuthResult = -1
+	}
+
+	out, _ := json.Marshal(resp)
+	log.Printf("send: %s", out)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(out)
+}
+
+func getFlowID(client *http.Client) string {
+	url := IdPBasePath + "/oauth2/authorize/"
+	form := "client_id=" + ClientID + "&client_secret=" + ClientSecret + "&response_type=code&redirect_uri=http://sftpdemo.com:8080/web/oidc/redirect&scope=openid&response_mode=direct"
+	req, _ := http.NewRequest("POST", url, bytes.NewBufferString(form))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, _ := client.Do(req)
+	b, _ := ioutil.ReadAll(res.Body)
+	var fm struct{ FlowId string }
+	json.Unmarshal(b, &fm)
+	return fm.FlowId
+}
+
+func postJSON(client *http.Client, url string, payload interface{}) ([]byte, error) {
+	b, _ := json.Marshal(payload)
+	res, err := client.Post(url, "application/json", bytes.NewBuffer(b))
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP error %d", res.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(res.Body)
+	return body, err
 }
