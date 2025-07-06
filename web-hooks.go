@@ -17,45 +17,7 @@ import (
 	"time"
 )
 
-// SFTPGoUser represents a user object from SFTPGo
-type SFTPGoUser struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-}
-
-// UserVirtualFolder represents a virtual folder for a user
-type UserVirtualFolder struct {
-	Name        string `json:"name"`
-	VirtualPath string `json:"virtual_path"`
-}
-
-// MinimalSFTPGoUser represents the minimal SFTPGo user structure for the hook
-type MinimalSFTPGoUser struct {
-	Username       string              `json:"username"`
-	HomeDir        string              `json:"home_dir"`
-	Permissions    map[string][]string `json:"permissions"`
-	Status         int                 `json:"status"`
-	VirtualFolders []UserVirtualFolder `json:"virtual_folders,omitempty"`
-}
-
-// TokenResponse represents the structure of an OAuth2 token response
-type TokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
-}
-
-// AsgardeoUser represents the relevant fields of an Asgardeo user
-type AsgardeoUser struct {
-	UserName   string `json:"userName"`
-	Wso2Schema struct {
-		UserRole string `json:"UserRole"`
-	} `json:"urn:scim:wso2:schema"`
-	CustomUser struct {
-		SftpAdminFolder string `json:"sftp_admin_folder"`
-	} `json:"urn:scim:schemas:extension:custom:User"`
-}
+// --- Global Variables (Environment Configuration) ---
 
 var (
 	ClientID       = os.Getenv("CLIENT_ID")
@@ -72,6 +34,159 @@ var (
 	SCIMScope      = os.Getenv("SCIM_SCOPE")
 )
 
+// --- Type Definitions ---
+
+// SFTPGoUser represents a user object from SFTPGo for pre-login hook
+type SFTPGoUser struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+}
+
+// UserVirtualFolder represents a virtual folder for a user in SFTPGo
+type UserVirtualFolder struct {
+	Name        string `json:"name"`
+	VirtualPath string `json:"virtual_path"`
+}
+
+// MinimalSFTPGoUser represents the minimal SFTPGo user structure for the hook response
+type MinimalSFTPGoUser struct {
+	Username       string              `json:"username"`
+	HomeDir        string              `json:"home_dir"`
+	Permissions    map[string][]string `json:"permissions"`
+	Status         int                 `json:"status"`
+	VirtualFolders []UserVirtualFolder `json:"virtual_folders,omitempty"`
+}
+
+// TokenResponse represents the structure of an OAuth2 token response (used for IdP and SFTPGo admin tokens)
+type TokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+	Scope       string `json:"scope"`
+}
+
+// AsgardeoUser represents the relevant fields of an Asgardeo user from SCIM
+type AsgardeoUser struct {
+	UserName   string `json:"userName"`
+	Wso2Schema struct {
+		UserRole string `json:"UserRole"`
+	} `json:"urn:scim:wso2:schema"`
+	CustomUser struct {
+		SftpAdminFolder string `json:"sftp_admin_folder"`
+	} `json:"urn:scim:schemas:extension:custom:User"`
+}
+
+// KeyIntRequest represents the incoming request from the SFTPGo client for keyboard-interactive auth.
+type KeyIntRequest struct {
+	RequestID string   `json:"request_id"`
+	Step      int      `json:"step"`
+	IP        string   `json:"ip"`
+	Username  string   `json:"username"` // Updated to "username" as per user's instruction
+	Answers   []string `json:"answers"`
+}
+
+// KeyIntResponse represents the response sent back to the SFTPGo client for keyboard-interactive auth.
+type KeyIntResponse struct {
+	AuthResult    int      `json:"auth_result"` // 1 for success, -1 for failure, 0 for incomplete
+	Instruction   string   `json:"instruction"`
+	Questions     []string `json:"questions"`
+	CheckPassword int      `json:"check_password"` // SFTPGo specific: 1 to check password, 0 otherwise
+	Echos         []bool   `json:"echos"`          // true for echo, false for no echo (e.g., password)
+}
+
+// RequiredParam represents a detailed parameter required by an authenticator, found in metadata.params.
+type RequiredParam struct {
+	ParamName      string `json:"param"`        // Matches "param" in JSON
+	ParamType      string `json:"type"`         // Matches "type" in JSON
+	IsConfidential bool   `json:"confidential"` // Matches "confidential" in JSON
+	DisplayName    string `json:"displayName"`  // Matches "displayName" in JSON
+	Order          int    `json:"order"`        // Matches "order" in JSON
+	I18nKey        string `json:"i18nKey"`      // Matches "i18nKey" in JSON
+}
+
+// AuthenticatorMetadata represents the metadata section of an authenticator, containing detailed parameters.
+type AuthenticatorMetadata struct {
+	I18nKey    string          `json:"i18nKey"`
+	PromptType string          `json:"promptType"`
+	Params     []RequiredParam `json:"params"` // This now correctly maps to the array of objects
+}
+
+// Authenticator represents an authentication method returned by the IdP.
+type Authenticator struct {
+	AuthenticatorID string                `json:"authenticatorId"`
+	DisplayName     string                `json:"authenticator"`
+	Metadata        AuthenticatorMetadata `json:"metadata"`       // Added to capture the nested metadata
+	RequiredParams  []string              `json:"requiredParams"` // Changed to []string to match JSON's array of strings
+	PromptType      string                `json:"promptType"`     // Keep this for top-level prompt type
+}
+
+// NextStep represents the next step in the authentication flow from IdP.
+type NextStep struct {
+	StepType       string          `json:"stepType"` // e.g., "AUTHENTICATION", "COMPLETED"
+	Authenticators []Authenticator `json:"authenticators"`
+}
+
+// IdPResponse represents the top-level response from the IdP's authentication endpoint.
+type IdPResponse struct {
+	FlowStatus        string                 `json:"flowStatus"`        // e.g., "INCOMPLETE", "COMPLETED", "FAILED"
+	NextStep          *NextStep              `json:"nextStep"`          // Pointer to NextStep, can be nil
+	AuthorizationCode string                 `json:"authorizationCode"` // Present on completion
+	AuthData          map[string]interface{} `json:"authData"`          // Alternative for authorizationCode
+	Error             string                 `json:"error"`             // Error message from IdP
+}
+
+// sessionData stores state for each ongoing authentication flow for key-int.
+type sessionData struct {
+	flowID          string
+	nextStep        *NextStep // Store the entire nextStep from IdP for dynamic handling
+	currentStepType string    // To keep track of the current step type (e.g., "AUTHENTICATION", "CHALLENGE")
+}
+
+// CustomerInfo represents the 200/201 response structure for the subscription hook.
+type CustomerInfo struct {
+	IsValidCustomer bool     `json:"isValidCustomer"`
+	ProjectKeys     []string `json:"projectKeys"`
+}
+
+// FolderResponse represents the successful JSON response structure for folder APIs.
+type FolderResponse struct {
+	IsValidCustomer bool     `json:"isValidCustomer"`
+	ProjectKeys     []string `json:"projectKeys"`
+}
+
+// ErrorMessage represents the 400/500 response structure for API errors.
+type ErrorMessage struct {
+	Message string `json:"message"`
+}
+
+// --- Session Cache for Key-Interactive Authentication ---
+
+var (
+	sessionCache = make(map[string]sessionData)
+	cacheMutex   = &sync.Mutex{}
+)
+
+// --- Dummy Data Setup (for subscription hook) ---
+
+// Define specific email addresses that will trigger different responses
+const (
+	email200_1 = "customer1@example.com"
+	email200_2 = "customer2@example.com"
+	email200_3 = "customer3@example.com"
+	email200_4 = "customer4@example.com"
+	email200_5 = "customer5@example.com" // 5 emails for 200
+
+	email201_1 = "newuser1@example.com"
+	email201_2 = "newuser2@example.com"
+	email201_3 = "newuser3@example.com" // 3 emails for 201
+
+	email500_1 = "error@example.com"             // 1 email for 500
+	email400_1 = "contact.not.found@example.com" // 1 email for 400 (specific email)
+)
+
+// --- Utility Functions ---
+
+// sanitizeUsername replaces special characters in a username with underscores.
 func sanitizeUsername(u string) string {
 	log.Printf("Sanitizing username: %s", u)
 	safe := strings.ReplaceAll(u, "@", "_")
@@ -82,6 +197,75 @@ func sanitizeUsername(u string) string {
 	return safe
 }
 
+// postJSON sends a JSON payload to the specified URL and returns the response body.
+func postJSON(client *http.Client, url string, payload interface{}) ([]byte, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal JSON payload: %w", err)
+	}
+	log.Printf("Sending POST to %s with payload: %s", url, string(b))
+
+	res, err := client.Post(url, "application/json", bytes.NewBuffer(b))
+	if err != nil {
+		return nil, fmt.Errorf("failed to send POST request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// IdP might return 4xx/5xx for authentication failures, which we need to parse as IdPResponse
+	// So, we don't return error immediately on >= 400 status.
+	// The caller will unmarshal body and check IdPResponse.FlowStatus/Error.
+	if res.StatusCode >= 400 {
+		log.Printf("Received HTTP error %d from %s: %s", res.StatusCode, url, string(body))
+	} else {
+		log.Printf("Received HTTP code %d from %s: %s", res.StatusCode, url, string(body))
+	}
+
+	return body, nil
+}
+
+// generatePromptFromAuthenticators dynamically creates the client-facing prompt based on IdP authenticators.
+func generatePromptFromAuthenticators(authenticators []Authenticator) (instruction string, questions []string, echos []bool) {
+	if len(authenticators) == 0 {
+		return "No authentication methods available.", []string{}, []bool{}
+	}
+
+	if len(authenticators) == 1 {
+		// If only one authenticator, directly prompt for its required parameters
+		auth := authenticators[0]
+		instruction = fmt.Sprintf("Enter your %s details:", auth.DisplayName)
+		// Use auth.Metadata.Params for detailed parameter information
+		for _, param := range auth.Metadata.Params {
+			questions = append(questions, fmt.Sprintf("%s:", param.DisplayName)) // Use DisplayName for the prompt
+			echos = append(echos, !param.IsConfidential)
+		}
+		if len(questions) == 0 {
+			// If no required params, it might be a selection step or a "press enter to proceed"
+			instruction = fmt.Sprintf("Press enter to proceed with %s.", auth.DisplayName)
+			questions = append(questions, "")
+			echos = append(echos, true)
+		}
+	} else {
+		// If multiple authenticators, prompt for selection
+		instruction = "Select an authentication method:"
+		selectionPrompt := ""
+		for i, auth := range authenticators {
+			selectionPrompt += fmt.Sprintf("[%d] %s\n", i+1, auth.DisplayName)
+		}
+		selectionPrompt += "Enter selection:" // Changed prompt for clarity
+		questions = append(questions, selectionPrompt)
+		echos = append(echos, true) // Echo the selection
+	}
+	return instruction, questions, echos
+}
+
+// --- IdP Interaction Functions ---
+
+// getBearerToken obtains an OAuth2 bearer token using client credentials grant.
 func getBearerToken() (string, error) {
 	log.Println("Attempting to obtain OAuth2 bearer token...")
 	data := url.Values{}
@@ -122,6 +306,7 @@ func getBearerToken() (string, error) {
 	return tr.AccessToken, nil
 }
 
+// getAsgardeoUser fetches user details from Asgardeo via SCIM API.
 func getAsgardeoUser(username, token string) (*AsgardeoUser, error) {
 	log.Printf("Fetching Asgardeo user for username: %s", username)
 	asgUser := username
@@ -175,65 +360,47 @@ func getAsgardeoUser(username, token string) (*AsgardeoUser, error) {
 	return &result.Resources[0], nil
 }
 
-// Define a struct to match the successful JSON response structure
-type FolderResponse struct {
-	IsValidCustomer bool     `json:"isValidCustomer"`
-	ProjectKeys     []string `json:"projectKeys"`
-}
-
-// Define a struct to match the error JSON response structure
-type ErrorResponse struct {
-	Message string `json:"message"`
-}
-
-func getUserFolderList(username string) []string {
-	log.Printf("Attempting to retrieve custom folder list for user: %s", username)
-	api := fmt.Sprintf(FetchFolderAPI,
-		url.QueryEscape(username),
-	)
-	req, err := http.NewRequest("GET", api, nil)
+// getFlowID initiates an authentication flow with the IdP and retrieves the flowId.
+func getFlowID(client *http.Client) (string, error) {
+	url := IdPBasePath + "/oauth2/authorize/"
+	// The redirect_uri and scope here are placeholders/examples.
+	// Ensure they match your IdP application configuration.
+	form := "client_id=" + ClientID + "&client_secret=" + ClientSecret + "&response_type=code&redirect_uri=http://sftpdemo.com:8080/web/oidc/redirect&scope=openid&response_mode=direct"
+	req, err := http.NewRequest("POST", url, bytes.NewBufferString(form))
 	if err != nil {
-		log.Printf("ERROR: Folder list request creation error for user %s: %v", username, err)
-		return nil
+		return "", fmt.Errorf("failed to create flow ID request: %w", err)
 	}
-	req.Header.Set("Accept", "application/json")
-	log.Printf("Sending request to custom folder API: %s", api)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	log.Printf("Requesting flow ID from %s with form: %s", url, form)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
-		log.Printf("ERROR: Failed to send folder list request for user %s: %v", username, err)
-		return nil
+		return "", fmt.Errorf("failed to send flow ID request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer res.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		// Attempt to decode as an error message
-		var errorResp ErrorResponse
-		if unmarshalErr := json.Unmarshal(body, &errorResp); unmarshalErr == nil && errorResp.Message != "" {
-			log.Printf("WARN: Folder list API for user %s returned status %d, message: %s", username, resp.StatusCode, errorResp.Message)
-		} else {
-			log.Printf("WARN: Folder list API for user %s returned status %d, body: %s", username, resp.StatusCode, body)
-		}
-		return nil
+	b, _ := ioutil.ReadAll(res.Body)
+	if res.StatusCode >= 400 {
+		return "", fmt.Errorf("HTTP error %d getting flow ID: %s", res.StatusCode, string(b))
+	} else {
+		log.Printf("Successfully obtained flow ID with payload: %s", string(b))
 	}
 
-	var folderResp FolderResponse
-	if err := json.NewDecoder(resp.Body).Decode(&folderResp); err != nil {
-		log.Printf("ERROR: Failed to decode custom folder list for user %s: %v", username, err)
-		return nil
+	if err != nil {
+		return "", fmt.Errorf("failed to read flow ID response body: %w", err)
 	}
 
-	if !folderResp.IsValidCustomer {
-		log.Printf("INFO: User %s is not a valid customer. No project keys returned.", username)
-		return nil // Or return an empty slice if that's desired for invalid customers
+	var fm struct{ FlowId string }
+	if err := json.Unmarshal(b, &fm); err != nil {
+		return "", fmt.Errorf("failed to unmarshal flow ID response: %w", err)
 	}
-
-	log.Printf("Successfully retrieved %d custom folders for user %s.", len(folderResp.ProjectKeys), username)
-	return folderResp.ProjectKeys
+	log.Printf("Successfully obtained flow ID: %s", fm.FlowId)
+	return fm.FlowId, nil
 }
 
+// --- SFTPGo Administration Functions ---
+
+// getSftpgoAdminToken obtains an admin token for SFTPGo API interactions.
 func getSftpgoAdminToken() (string, error) {
 	log.Println("Attempting to obtain SFTPGo admin token...")
 	req, err := http.NewRequest("GET", AdminTokenURL, nil)
@@ -265,6 +432,7 @@ func getSftpgoAdminToken() (string, error) {
 	return tr.AccessToken, nil
 }
 
+// checkFolderExists checks if a given folder exists in SFTPGo.
 func checkFolderExists(name, token string) (bool, error) {
 	log.Printf("Checking if SFTPGo folder '%s' exists.", name)
 	endpoint := SftpgoFolders + "/" + name
@@ -298,13 +466,14 @@ func checkFolderExists(name, token string) (bool, error) {
 	}
 }
 
+// createFolder creates a new folder in SFTPGo.
 func createFolder(name, token, user string) error {
 	log.Printf("Attempting to create SFTPGo folder '%s' for user '%s'.", name, user)
 	path := filepath.Join(FolderPath, name)
 	// log.Printf("Creating local directory path: %s", path)
 	// if err := os.MkdirAll(path, 0755); err != nil {
-	// 	log.Printf("ERROR: Failed to create local directory %s: %v", path, err)
-	// 	return fmt.Errorf("failed to create local directory: %v", err)
+	//  log.Printf("ERROR: Failed to create local directory %s: %v", path, err)
+	//  return fmt.Errorf("failed to create local directory: %v", err)
 	// }
 
 	payload := map[string]interface{}{
@@ -345,6 +514,7 @@ func createFolder(name, token, user string) error {
 	return nil
 }
 
+// provisionUserFolders ensures necessary folders exist for a user in SFTPGo.
 func provisionUserFolders(user string, folders []string) error {
 	log.Printf("Starting folder provisioning for user: %s. Folders to check/create: %v", user, folders)
 	token, err := getSftpgoAdminToken()
@@ -375,6 +545,7 @@ func provisionUserFolders(user string, folders []string) error {
 	return nil
 }
 
+// getAllFolders fetches all existing SFTPGo folders.
 func getAllFolders(token string) ([]UserVirtualFolder, error) {
 	log.Println("Fetching all existing SFTPGo folders.")
 	endpoint := SftpgoFolders // + "?limit=5000"
@@ -413,6 +584,58 @@ func getAllFolders(token string) ([]UserVirtualFolder, error) {
 	return result, nil
 }
 
+// getUserFolderList retrieves a custom folder list for a user from an external API.
+func getUserFolderList(username string) []string {
+	log.Printf("Attempting to retrieve custom folder list for user: %s", username)
+	api := fmt.Sprintf(FetchFolderAPI,
+		url.QueryEscape(username),
+	)
+	req, err := http.NewRequest("GET", api, nil)
+	if err != nil {
+		log.Printf("ERROR: Folder list request creation error for user %s: %v", username, err)
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+	log.Printf("Sending request to custom folder API: %s", api)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("ERROR: Failed to send folder list request for user %s: %v", username, err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		// Attempt to decode as an error message
+		var errorResp ErrorMessage
+		if unmarshalErr := json.Unmarshal(body, &errorResp); unmarshalErr == nil && errorResp.Message != "" {
+			log.Printf("WARN: Folder list API for user %s returned status %d, message: %s", username, resp.StatusCode, errorResp.Message)
+		} else {
+			log.Printf("WARN: Folder list API for user %s returned status %d, body: %s", username, resp.StatusCode, body)
+		}
+		return nil
+	}
+
+	var folderResp FolderResponse
+	if err := json.NewDecoder(resp.Body).Decode(&folderResp); err != nil {
+		log.Printf("ERROR: Failed to decode custom folder list for user %s: %v", username, err)
+		return nil
+	}
+
+	if !folderResp.IsValidCustomer {
+		log.Printf("INFO: User %s is not a valid customer. No project keys returned.", username)
+		return nil // Or return an empty slice if that's desired for invalid customers
+	}
+
+	log.Printf("Successfully retrieved %d custom folders for user %s.", len(folderResp.ProjectKeys), username)
+	return folderResp.ProjectKeys
+}
+
+// --- HTTP Handlers ---
+
+// preLoginHook handles SFTPGo's pre-login hook to provision users and folders.
 func preLoginHook(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received pre-login hook request from %s for method %s", r.RemoteAddr, r.Method)
 
@@ -557,197 +780,7 @@ func preLoginHook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func main() {
-	// Configure logging output to include date, time, and file name/line number
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	log.Println("Starting SFTPGo Pre-Login Hook service...")
-	log.Printf("Environment Variables Loaded:")
-	log.Printf("  CLIENT_ID: %s", ClientID)
-	log.Printf("  IDP_BASE_PATH: %s", IdPBasePath)
-	log.Printf("  FETCH_FOLDER_API: %s", FetchFolderAPI)
-	log.Printf("  ADMIN_TOKEN_URL: %s", AdminTokenURL)
-	log.Printf("  ADMIN_USER: %s (first 4 chars)", AdminUser[:4])
-	log.Printf("  SFTPGO_FOLDERS: %s", SftpgoFolders)
-	log.Printf("  FOLDER_PATH: %s", FolderPath)
-	log.Printf("  CHECK_ROLE: %s", CheckRole)
-	log.Printf("  DIR_PATH: %s", DIRPath)
-	log.Printf("  SCIM_SCOPE: %s", SCIMScope)
-
-	// Basic validation for critical environment variables
-	if ClientID == "" || ClientSecret == "" || IdPBasePath == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
-		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, IDP_BASE_PATH, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
-	}
-
-	http.HandleFunc("/prelogin-hook", preLoginHook)
-	http.HandleFunc("/auth-hook", keyIntHandler)
-	http.HandleFunc("/subscription-hook", subscriptionHandler) // Only for demo purpose
-
-	log.Println("SFTPGo Pre-Login and Auth Hooks are listening on :9000/prelogin-hook and :9000/auth-hook")
-	if err := http.ListenAndServe(":9000", nil); err != nil {
-		log.Fatalf("FATAL: Server error: %v", err)
-	}
-}
-
-// KeyIntRequest represents the incoming request from the client.
-type KeyIntRequest struct {
-	RequestID string   `json:"request_id"`
-	Step      int      `json:"step"`
-	IP        string   `json:"ip"`
-	Username  string   `json:"user"`
-	Answers   []string `json:"answers"`
-}
-
-// KeyIntResponse represents the response sent back to the client.
-type KeyIntResponse struct {
-	AuthResult    int      `json:"auth_result"` // 1 for success, -1 for failure, 0 for incomplete
-	Instruction   string   `json:"instruction"`
-	Questions     []string `json:"questions"`
-	CheckPassword int      `json:"check_password"`
-	Echos         []bool   `json:"echos"` // true for echo, false for no echo (e.g., password)
-}
-
-// --- IdP API Response Structs (to dynamically parse responses from the Identity Provider) ---
-
-// RequiredParam represents a parameter required by an authenticator.
-type RequiredParam struct {
-	ParamName      string `json:"paramName"`
-	ParamType      string `json:"paramType"`
-	IsConfidential bool   `json:"isConfidential"`
-}
-
-// Authenticator represents an authentication method returned by the IdP.
-type Authenticator struct {
-	AuthenticatorID string          `json:"authenticatorId"`
-	DisplayName     string          `json:"displayName"`
-	RequiredParams  []RequiredParam `json:"requiredParams"`
-	PromptType      string          `json:"promptType"` // e.g., "TEXT", "PASSWORD", "SELECT"
-}
-
-// NextStep represents the next step in the authentication flow.
-type NextStep struct {
-	StepType       string          `json:"stepType"` // e.g., "AUTHENTICATION", "COMPLETED"
-	Authenticators []Authenticator `json:"authenticators"`
-}
-
-// IdPResponse represents the top-level response from the IdP.
-type IdPResponse struct {
-	FlowStatus        string                 `json:"flowStatus"`        // e.g., "INCOMPLETE", "COMPLETED", "FAILED"
-	NextStep          *NextStep              `json:"nextStep"`          // Pointer to NextStep, can be nil
-	AuthorizationCode string                 `json:"authorizationCode"` // Present on completion
-	AuthData          map[string]interface{} `json:"authData"`          // Alternative for authorizationCode
-	Error             string                 `json:"error"`             // Error message from IdP
-}
-
-// --- Session Management ---
-
-// sessionData stores state for each ongoing authentication flow.
-type sessionData struct {
-	flowID          string
-	nextStep        *NextStep // Store the entire nextStep from IdP for dynamic handling
-	currentStepType string    // To keep track of the current step type (e.g., "AUTHENTICATION", "CHALLENGE")
-}
-
-var (
-	sessionCache = make(map[string]sessionData)
-	cacheMutex   = &sync.Mutex{}
-)
-
-// getFlowID initiates an authentication flow and retrieves the flowId.
-func getFlowID(client *http.Client) (string, error) {
-	url := IdPBasePath + "/oauth2/authorize/"
-	form := "client_id=" + ClientID + "&client_secret=" + ClientSecret + "&response_type=code&redirect_uri=http://sftpdemo.com:8080/web/oidc/redirect&scope=openid&response_mode=direct"
-	req, err := http.NewRequest("POST", url, bytes.NewBufferString(form))
-	if err != nil {
-		return "", fmt.Errorf("failed to create flow ID request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	res, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send flow ID request: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode >= 400 {
-		body, _ := ioutil.ReadAll(res.Body)
-		return "", fmt.Errorf("HTTP error %d getting flow ID: %s", res.StatusCode, string(body))
-	}
-
-	b, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read flow ID response body: %w", err)
-	}
-
-	var fm struct{ FlowId string }
-	if err := json.Unmarshal(b, &fm); err != nil {
-		return "", fmt.Errorf("failed to unmarshal flow ID response: %w", err)
-	}
-	return fm.FlowId, nil
-}
-
-// postJSON sends a JSON payload to the specified URL and returns the response body.
-func postJSON(client *http.Client, url string, payload interface{}) ([]byte, error) {
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal JSON payload: %w", err)
-	}
-	log.Printf("Sending POST to %s with payload: %s", url, string(b))
-
-	res, err := client.Post(url, "application/json", bytes.NewBuffer(b))
-	if err != nil {
-		return nil, fmt.Errorf("failed to send POST request: %w", err)
-	}
-	defer res.Body.Close()
-
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if res.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP error %d: %s", res.StatusCode, string(body))
-	}
-
-	return body, nil
-}
-
-// generatePromptFromAuthenticators dynamically creates the client-facing prompt.
-func generatePromptFromAuthenticators(authenticators []Authenticator) (instruction string, questions []string, echos []bool) {
-	if len(authenticators) == 0 {
-		return "No authentication methods available.", []string{}, []bool{}
-	}
-
-	if len(authenticators) == 1 {
-		// If only one authenticator, directly prompt for its required parameters
-		auth := authenticators[0]
-		instruction = fmt.Sprintf("Enter your %s details:", auth.DisplayName)
-		for _, param := range auth.RequiredParams {
-			questions = append(questions, fmt.Sprintf("%s:", param.ParamName))
-			echos = append(echos, !param.IsConfidential)
-		}
-		if len(questions) == 0 {
-			// If no required params, it might be a selection step
-			instruction = fmt.Sprintf("Press enter to proceed with %s.", auth.DisplayName)
-			questions = append(questions, "")
-			echos = append(echos, true)
-		}
-	} else {
-		// If multiple authenticators, prompt for selection
-		instruction = "Select an authentication method:"
-		selectionPrompt := ""
-		for i, auth := range authenticators {
-			selectionPrompt += fmt.Sprintf("[%d] %s\n", i+1, auth.DisplayName)
-		}
-		selectionPrompt += "Enter:"
-		questions = append(questions, selectionPrompt)
-		echos = append(echos, true) // Echo the selection
-	}
-	return instruction, questions, echos
-}
-
-// --- Main Handler Function ---
-
-// keyIntHandler handles the interaction with the client and the IdP.
+// keyIntHandler handles the keyboard-interactive authentication flow with the IdP.
 func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 	var req KeyIntRequest
 	body, err := ioutil.ReadAll(r.Body)
@@ -761,7 +794,7 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-	log.Printf("recv step=%d id=%s user=%s answers=%v", req.Step, req.RequestID, req.Username, req.Answers)
+	log.Printf("Received keyIntHandler request: step=%d id=%s user=%s answers=%v", req.Step, req.RequestID, req.Username, req.Answers)
 
 	var resp KeyIntResponse
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -771,66 +804,64 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 	data, ok := sessionCache[req.RequestID]
 	cacheMutex.Unlock()
 
-	// Declare respBody here so it's accessible throughout the function
-	var respBody []byte
+	// Declare idpRespBytes here so it's accessible throughout the function
+	var idpRespBytes []byte
 
-	// Handle initial request (Step 1: Get Username/Password)
+	// Handle initial request (Step 1: SFTPGo client sends username and password)
+	// SFTPGo always sends the username in req.Username and the password in req.Answers[0] for the first step.
+	// We will use these directly and not re-prompt the user for them.
 	if req.Step == 1 {
-		resp.Instruction = "Enter your username and password:"
-		resp.Questions = []string{"Username:", "Password:"}
-		resp.Echos = []bool{true, false} // Echo username, hide password
-		// No IdP call yet, just prompt for initial credentials
-	} else if req.Step == 2 {
-		// Step 2: Send username/password to IdP and get next step
 		username := req.Username
-		password := ""
-		if len(req.Answers) > 1 {
-			username = req.Answers[0] // Assuming answers[0] is username, answers[1] is password
-			password = req.Answers[1]
-		} else if len(req.Answers) > 0 {
-			// Fallback if client only sends password in answers[0] for some reason
-			password = req.Answers[0]
+
+		if username == "" {
+			log.Printf("ERROR: Username is missing in initial request for RequestID: %s", req.RequestID)
+			resp.AuthResult = -1
+			resp.Instruction = "Authentication failed: Username missing."
+			goto sendResponse
 		}
 
+		// 1. Get the initial flow ID from the IdP
 		flow, err := getFlowID(client)
 		if err != nil {
-			log.Printf("ERROR: Failed to get flow ID: %v", err)
+			log.Printf("ERROR: Failed to get flow ID for user %s: %v", username, err)
 			resp.AuthResult = -1
-			goto sendResponse // Use goto for early exit on error
+			resp.Instruction = "Authentication failed: Internal error getting flow ID."
+			goto sendResponse
 		}
 
+		// 2. Initiate the authentication flow with username and password
+		// The username and password are "autofilled" into this payload, as they are provided by SFTPGo.
 		primaryAuthPayload := map[string]interface{}{
 			"flowId": flow,
 			"selectedAuthenticator": map[string]interface{}{
-				"authenticatorId": "QmFzaWNBdXRoZW50aWNhdG9yOkxPQ0FM", // Basic Authenticator ID
-				"params":          map[string]interface{}{"username": username, "password": password},
+				"authenticatorId": "SWRlbnRpZmllckV4ZWN1dG9yOkxPQ0FM", // Identifier first Authenticator ID for Asgardeo
+				"params":          map[string]interface{}{"username": username},
 			},
 		}
 
-		respBody, err := postJSON(client, idpURL, primaryAuthPayload)
+		idpRespBytes, err = postJSON(client, idpURL, primaryAuthPayload)
 		if err != nil {
-			log.Printf("ERROR: Primary authentication failed: %v", err)
+			log.Printf("ERROR: Failed to send primary authentication request for user %s: %v", username, err)
 			resp.AuthResult = -1
+			resp.Instruction = "Authentication failed: Communication error with IdP."
 			goto sendResponse
 		}
 
 		var idpResp IdPResponse
-		if err := json.Unmarshal(respBody, &idpResp); err != nil {
-			log.Printf("ERROR: Failed to unmarshal IdP response after primary auth: %v", err)
+		if err := json.Unmarshal(idpRespBytes, &idpResp); err != nil {
+			log.Printf("ERROR: Failed to unmarshal IdP response after primary auth for user %s: %v, Response Body: %s", username, err, string(idpRespBytes))
 			resp.AuthResult = -1
+			resp.Instruction = "Authentication failed: Invalid response from IdP."
 			goto sendResponse
 		}
 
+		// 3. Process the IdP's response
 		if idpResp.FlowStatus == "COMPLETED" {
-			log.Printf("Authentication successful for %s (completed in step 2)", username)
+			log.Printf("Authentication successful for %s (completed in step 1)", username)
 			resp.AuthResult = 1
-			// Clean up session cache
-			cacheMutex.Lock()
-			delete(sessionCache, req.RequestID)
-			cacheMutex.Unlock()
-			goto sendResponse
+			// No need to store session data as flow is complete
 		} else if idpResp.FlowStatus == "INCOMPLETE" && idpResp.NextStep != nil {
-			// Store the next step information in the session
+			// Store the next step information in the session cache
 			cacheMutex.Lock()
 			sessionCache[req.RequestID] = sessionData{
 				flowID:          flow,
@@ -839,15 +870,22 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			cacheMutex.Unlock()
 
-			// Dynamically generate the prompt for the next step
+			// Dynamically generate the prompt for the client based on the IdP's next step
+			// This will NOT re-prompt for username/password, but for subsequent MFA/challenge steps.
 			resp.Instruction, resp.Questions, resp.Echos = generatePromptFromAuthenticators(idpResp.NextStep.Authenticators)
-			resp.AuthResult = 0 // Incomplete
+			resp.AuthResult = 0 // Incomplete, client needs to provide more answers
+			log.Printf("Authentication incomplete for %s. IdP requires further steps. Instruction: '%s', Questions: %v", username, resp.Instruction, resp.Questions)
 		} else {
-			log.Printf("ERROR: Unexpected IdP flow status or missing next step: %s", idpResp.FlowStatus)
+			// Authentication failed or unexpected flow status
+			log.Printf("ERROR: Authentication failed or unexpected IdP flow status for user %s: %s. IdP Error: %s", username, idpResp.FlowStatus, idpResp.Error)
 			resp.AuthResult = -1
-			goto sendResponse
+			if idpResp.Error != "" {
+				resp.Instruction = "Authentication failed: " + idpResp.Error
+			} else {
+				resp.Instruction = "Authentication failed. Please try again."
+			}
 		}
-	} else if ok { // Subsequent steps (req.Step > 2)
+	} else if ok { // Subsequent steps (req.Step > 1)
 		// Retrieve session data
 		flow := data.flowID
 		currentNextStep := data.nextStep
@@ -855,6 +893,7 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 		if currentNextStep == nil || len(currentNextStep.Authenticators) == 0 {
 			log.Printf("ERROR: Invalid session state for request ID %s: No next step or authenticators.", req.RequestID)
 			resp.AuthResult = -1
+			resp.Instruction = "Authentication session expired or invalid. Please start over."
 			goto sendResponse
 		}
 
@@ -862,41 +901,69 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 		var authenticatorParams = make(map[string]interface{})
 		var err error
 
+		// Determine the selected authenticator and populate its parameters
 		if len(currentNextStep.Authenticators) > 1 {
-			// User is selecting an authenticator
+			// User is selecting an authenticator (e.g., from a list of MFA options)
 			if len(req.Answers) == 0 {
 				log.Printf("ERROR: No authenticator selection provided for request ID %s", req.RequestID)
 				resp.AuthResult = -1
+				resp.Instruction = "Authentication failed: Please select an option."
 				goto sendResponse
 			}
 			selection, parseErr := strconv.Atoi(req.Answers[0])
 			if parseErr != nil || selection < 1 || selection > len(currentNextStep.Authenticators) {
 				log.Printf("ERROR: Invalid authenticator selection '%s' for request ID %s", req.Answers[0], req.RequestID)
 				resp.AuthResult = -1
+				resp.Instruction = "Authentication failed: Invalid selection."
 				goto sendResponse
 			}
 			selectedAuthenticator = currentNextStep.Authenticators[selection-1] // Adjust for 0-based index
+
+			// After selection, the next client request (same req.Step if client resends, or next req.Step)
+			// should provide parameters for this selected authenticator.
+			// For simplicity in this example, we assume the SFTPGo client will send the selection
+			// and then the parameters in the *next* request if needed.
+			// If the selected authenticator has required parameters, we need to prompt for them.
+			// This means we might need to update the session's `nextStep` to reflect
+			// the parameters of the *chosen* authenticator, and then re-prompt.
+			if len(selectedAuthenticator.Metadata.Params) > 0 { // Use Metadata.Params here
+				// This implies the client needs to be prompted for these params next.
+				// We update the session and send the new prompt.
+				cacheMutex.Lock()
+				sessionCache[req.RequestID] = sessionData{
+					flowID:          flow,
+					nextStep:        &NextStep{Authenticators: []Authenticator{selectedAuthenticator}}, // Update nextStep to focus on this authenticator
+					currentStepType: selectedAuthenticator.PromptType,                                  // Or a more specific type
+				}
+				cacheMutex.Unlock()
+
+				resp.Instruction, resp.Questions, resp.Echos = generatePromptFromAuthenticators([]Authenticator{selectedAuthenticator})
+				resp.AuthResult = 0 // Incomplete, waiting for params
+				log.Printf("User %s selected authenticator '%s'. Prompting for its parameters. Instruction: '%s', Questions: %v", req.Username, selectedAuthenticator.DisplayName, resp.Instruction, resp.Questions)
+				goto sendResponse // Send the prompt for parameters
+			}
+			// If no required params, then this selection implicitly completes this step.
+			// We proceed to send the payload with just the authenticator ID.
+			authenticatorParams = make(map[string]interface{}) // Empty params
 		} else {
-			// Only one authenticator available, it's implicitly selected
+			// Only one authenticator available, it's implicitly selected.
+			// The answers provided in req.Answers are assumed to be for its required parameters.
 			selectedAuthenticator = currentNextStep.Authenticators[0]
-			// Populate params from answers for this single authenticator
-			if len(req.Answers) != len(selectedAuthenticator.RequiredParams) {
+
+			if len(req.Answers) != len(selectedAuthenticator.Metadata.Params) { // Use Metadata.Params here
 				log.Printf("ERROR: Mismatch in number of answers and required params for authenticator %s. Expected %d, got %d.",
-					selectedAuthenticator.DisplayName, len(selectedAuthenticator.RequiredParams), len(req.Answers))
+					selectedAuthenticator.DisplayName, len(selectedAuthenticator.Metadata.Params), len(req.Answers))
 				resp.AuthResult = -1
+				resp.Instruction = "Authentication failed: Missing answers for required fields."
 				goto sendResponse
 			}
-			for i, param := range selectedAuthenticator.RequiredParams {
+			for i, param := range selectedAuthenticator.Metadata.Params { // Use Metadata.Params here
 				authenticatorParams[param.ParamName] = req.Answers[i]
 			}
+			log.Printf("User %s providing answers for authenticator '%s'. Params: %v", req.Username, selectedAuthenticator.DisplayName, authenticatorParams)
 		}
 
-		// If the selected authenticator has required parameters, and it was *just* selected (not already provided)
-		// then the next request will need to prompt for those parameters.
-		// This logic needs careful handling to avoid prompting for selection AND parameters in the same step.
-		// For simplicity, we assume the client sends selection first, then parameters in the next step.
-
-		// Construct the payload for the IdP based on the selected authenticator and user answers
+		// Construct the payload for the IdP for the current step
 		payload := map[string]interface{}{
 			"flowId": flow,
 			"selectedAuthenticator": map[string]interface{}{
@@ -905,59 +972,39 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		// If this is a selection step, and the selected authenticator has parameters,
-		// we need to set up the next prompt for those parameters.
-		// Otherwise, we send the current answers as parameters.
-		if selectedAuthenticator.PromptType == "SELECT" && len(selectedAuthenticator.RequiredParams) > 0 {
-			// This case means the user selected an authenticator, and now we need to prompt for its params.
-			// This is a bit tricky with the current `req.Step` model.
-			// A better approach would be to have the client always send the selected authenticator ID
-			// and then the parameters in the *next* request.
-			// For now, we'll assume the answers provided are for the parameters of the *already selected* authenticator.
-			// The `generatePromptFromAuthenticators` should handle the case where a single authenticator requires input.
-			// If the current step was a selection, and the user provided a selection,
-			// the next step should be to prompt for the parameters of the *chosen* authenticator.
-			// The `currentNextStep` in session will still reflect the multiple authenticators.
-			// We need to update `currentNextStep` to reflect the chosen authenticator's params for the next client prompt.
-
-			// For now, let's assume `req.Answers` directly contain the parameters for the *implicitly* selected authenticator
-			// or the parameters after a selection.
-			// The `generatePromptFromAuthenticators` will handle the output for the client.
-		}
-
-		respBody, err = postJSON(client, idpURL, payload)
+		idpRespBytes, err = postJSON(client, idpURL, payload)
 		if err != nil {
 			log.Printf("ERROR: Authentication step failed for %s: %v", req.Username, err)
 			resp.AuthResult = -1
+			resp.Instruction = "Authentication failed: Communication error with IdP in subsequent step."
 			goto sendResponse
 		}
 
 		var idpResp IdPResponse
-		if err := json.Unmarshal(respBody, &idpResp); err != nil {
-			log.Printf("ERROR: Failed to unmarshal IdP response in subsequent step: %v", err)
+		if err := json.Unmarshal(idpRespBytes, &idpResp); err != nil {
+			log.Printf("ERROR: Failed to unmarshal IdP response in subsequent step for user %s: %v, Response Body: %s", req.Username, err, string(idpRespBytes))
 			resp.AuthResult = -1
+			resp.Instruction = "Authentication failed: Invalid response from IdP in subsequent step."
 			goto sendResponse
 		}
 
-		if idpResp.FlowStatus == "COMPLETED" {
+		if idpResp.FlowStatus == "SUCCESS_COMPLETED" {
 			log.Printf("Authentication successful for %s", req.Username)
 			resp.AuthResult = 1
-			// Extract authorization code
+			// Extract authorization code (if needed by SFTPGo, though typically not for key-int)
 			if idpResp.AuthorizationCode != "" {
-				// Use idpResp.AuthorizationCode
 				log.Printf("Authorization Code: %s", idpResp.AuthorizationCode)
 			} else if idpResp.AuthData != nil {
 				if code, ok := idpResp.AuthData["code"].(string); ok && code != "" {
-					// Use code from authData
 					log.Printf("Authorization Code (from authData): %s", code)
 				}
 			}
-			// Clean up session cache
+			// Clean up session cache as flow is complete
 			cacheMutex.Lock()
 			delete(sessionCache, req.RequestID)
 			cacheMutex.Unlock()
 		} else if idpResp.FlowStatus == "INCOMPLETE" && idpResp.NextStep != nil {
-			// Update session with the new next step
+			// Update session with the new next step from IdP
 			cacheMutex.Lock()
 			sessionCache[req.RequestID] = sessionData{
 				flowID:          flow,
@@ -966,18 +1013,19 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			cacheMutex.Unlock()
 
-			// Dynamically generate the prompt for the client
+			// Dynamically generate the prompt for the client based on the new next step
 			resp.Instruction, resp.Questions, resp.Echos = generatePromptFromAuthenticators(idpResp.NextStep.Authenticators)
 			resp.AuthResult = 0 // Still incomplete
+			log.Printf("Authentication incomplete for %s. IdP requires further steps. Instruction: '%s', Questions: %v", req.Username, resp.Instruction, resp.Questions)
 		} else {
-			log.Printf("ERROR: Authentication failed or unexpected IdP response for %s: %s", req.Username, idpResp.FlowStatus)
+			// Authentication failed or unexpected IdP response in a subsequent step
+			log.Printf("ERROR: Authentication failed or unexpected IdP response for user %s: %s. IdP Error: %s", req.Username, idpResp.FlowStatus, idpResp.Error)
+			resp.AuthResult = -1
 			if idpResp.Error != "" {
-				log.Printf("IdP Error Message: %s", idpResp.Error)
 				resp.Instruction = "Authentication failed: " + idpResp.Error
 			} else {
 				resp.Instruction = "Authentication failed. Please try again."
 			}
-			resp.AuthResult = -1
 		}
 	} else {
 		// No session data found for subsequent steps or invalid step
@@ -986,47 +1034,19 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 		resp.Instruction = "Authentication session expired or invalid. Please start over."
 	}
 
-sendResponse:
+sendResponse: // Label for goto statements
 	out, err := json.Marshal(resp)
 	if err != nil {
 		log.Printf("ERROR: Failed to marshal response to client: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("send: %s", out)
+	log.Printf("Sending response to client: %s", out)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(out)
 }
 
-// CustomerInfo represents the 200/201 response structure
-type CustomerInfo struct {
-	IsValidCustomer bool     `json:"isValidCustomer"`
-	ProjectKeys     []string `json:"projectKeys"`
-}
-
-// ErrorMessage represents the 400/500 response structure
-type ErrorMessage struct {
-	Message string `json:"message"`
-}
-
-// --- Dummy Data Setup ---
-
-// Define specific email addresses that will trigger different responses
-const (
-	email200_1 = "customer1@example.com"
-	email200_2 = "customer2@example.com"
-	email200_3 = "customer3@example.com"
-	email200_4 = "customer4@example.com"
-	email200_5 = "customer5@example.com" // 5 emails for 200
-
-	email201_1 = "newuser1@example.com"
-	email201_2 = "newuser2@example.com"
-	email201_3 = "newuser3@example.com" // 3 emails for 201
-
-	email500_1 = "error@example.com"             // 1 email for 500
-	email400_1 = "contact.not.found@example.com" // 1 email for 400 (specific email)
-)
-
+// subscriptionHandler is a dummy handler for subscription API.
 func subscriptionHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received request for /subscription from %s. Path: %s, Query: %s", r.RemoteAddr, r.URL.Path, r.URL.RawQuery)
 
@@ -1090,5 +1110,38 @@ func subscriptionHandler(w http.ResponseWriter, r *http.Request) {
 			ProjectKeys:     []string{},
 		})
 		return
+	}
+}
+
+// --- Main Function ---
+
+func main() {
+	// Configure logging output to include date, time, and file name/line number
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.Println("Starting SFTPGo Pre-Login Hook service...")
+	log.Printf("Environment Variables Loaded:")
+	log.Printf("  CLIENT_ID: %s", ClientID)
+	log.Printf("  IDP_BASE_PATH: %s", IdPBasePath)
+	log.Printf("  FETCH_FOLDER_API: %s", FetchFolderAPI)
+	log.Printf("  ADMIN_TOKEN_URL: %s", AdminTokenURL)
+	log.Printf("  ADMIN_USER: %s (first 4 chars)", AdminUser[:4])
+	log.Printf("  SFTPGO_FOLDERS: %s", SftpgoFolders)
+	log.Printf("  FOLDER_PATH: %s", FolderPath)
+	log.Printf("  CHECK_ROLE: %s", CheckRole)
+	log.Printf("  DIR_PATH: %s", DIRPath)
+	log.Printf("  SCIM_SCOPE: %s", SCIMScope)
+
+	// Basic validation for critical environment variables
+	if ClientID == "" || ClientSecret == "" || IdPBasePath == "" || AdminTokenURL == "" || AdminUser == "" || AdminKey == "" || SftpgoFolders == "" || FolderPath == "" || DIRPath == "" || CheckRole == "" || SCIMScope == "" {
+		log.Fatal("ERROR: One or more critical environment variables are not set. Please ensure CLIENT_ID, CLIENT_SECRET, IDP_BASE_PATH, ADMIN_TOKEN_URL, ADMIN_USER, ADMIN_KEY, SFTPGO_FOLDERS, FOLDER_PATH, DIR_PATH, CHECK_ROLE, SCIM_SCOPE are configured.")
+	}
+
+	http.HandleFunc("/prelogin-hook", preLoginHook)
+	http.HandleFunc("/auth-hook", keyIntHandler)
+	http.HandleFunc("/subscription-hook", subscriptionHandler) // Only for demo purpose
+
+	log.Println("SFTPGo Pre-Login and Auth Hooks are listening on :9000/prelogin-hook and :9000/auth-hook")
+	if err := http.ListenAndServe(":9000", nil); err != nil {
+		log.Fatalf("FATAL: Server error: %v", err)
 	}
 }
