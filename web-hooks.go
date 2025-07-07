@@ -1010,7 +1010,7 @@ func keyIntHandler(w http.ResponseWriter, r *http.Request) {
 			cacheMutex.Lock()
 			delete(sessionCache, req.RequestID)
 			cacheMutex.Unlock()
-		} else if idpResp.FlowStatus == "INCOMPLETE" && idpResp.NextStep != nil {
+		} else if idpResp.FlowStatus == "FAIL_INCOMPLETE" && idpResp.NextStep != nil {
 			// Update session with the new next step from IdP
 			cacheMutex.Lock()
 			sessionCache[req.RequestID] = sessionData{
