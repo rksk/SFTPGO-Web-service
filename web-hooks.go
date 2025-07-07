@@ -630,7 +630,14 @@ func getUserFolderList(username string) []string {
 	}
 
 	log.Printf("Successfully retrieved %d custom folders for user %s.", len(folderResp.ProjectKeys), username)
-	return folderResp.ProjectKeys
+
+	// Convert all project keys to lowercase
+	lowercaseProjectKeys := make([]string, len(folderResp.ProjectKeys))
+	for i, key := range folderResp.ProjectKeys {
+		lowercaseProjectKeys[i] = strings.ToLower(key)
+	}
+
+	return lowercaseProjectKeys
 }
 
 // --- HTTP Handlers ---
@@ -723,14 +730,14 @@ func preLoginHook(w http.ResponseWriter, r *http.Request) {
 
 	} else {
 		log.Printf("Configuring SFTPGo user '%s' as external user.", user)
-		home = filepath.Join(DIRPath, sanitizeUsername(user))
-		log.Printf("Setting home directory to: %s", home)
-		if err := os.MkdirAll(home, 0755); err != nil {
-			log.Printf("ERROR: Failed to create home directory %s for user %s: %v", home, user, err)
-			// Decide if this should be a fatal error or just logged
-		} else {
-			log.Printf("Ensured home directory %s exists for user %s.", home, user)
-		}
+		// home = filepath.Join(DIRPath, sanitizeUsername(user))
+		// log.Printf("Setting home directory to: %s", home)
+		// if err := os.MkdirAll(home, 0755); err != nil {
+		// 	log.Printf("ERROR: Failed to create home directory %s for user %s: %v", home, user, err)
+		// 	// Decide if this should be a fatal error or just logged
+		// } else {
+		// 	log.Printf("Ensured home directory %s exists for user %s.", home, user)
+		// }
 
 		folders = getUserFolderList(user)
 		if len(folders) == 0 {
